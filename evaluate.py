@@ -1,9 +1,24 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
 """
-Pairwise GPT‑4 evaluation: compare *one* prediction file (global or client)
-against an explicit *baseline* prediction file.
+Pairwise GPT‑4 evaluation: compare *one* prediction file (global or client)
+against an explicit *baseline* prediction file, with *n_eval* independent
+GPT‑4 votes per sample (default = 3).
 
-All files are JSON‑Lines with at least:
-    instruction • input (optional) • <answer‑field>
+**New in this version**
+–––––––––––––––––––––––
+1.   Aggregate results *per category* (record field ``category``).  The output
+     JSON now contains a ``categories`` section with, for each category:
+        • sample count
+        • average prediction score
+        • average baseline score
+2.   Per‑sample details are **not** saved any more to keep files compact.
+3.   Backward‑compatible CLI – just add ``--n_eval 5`` (or omit for default 3).
+
+Input JSON‑Lines must contain at least::
+
+    instruction • input (optional) • category • <answer‑field>
+
 """
 
 import json, os, re, time
@@ -15,18 +30,14 @@ from tqdm import tqdm
 # ---------------- GPT prompt helpers ---------------- #
 PAIR_PROMPT = """
 You are an expert language‑model evaluator.
-
 Given an instruction (and optional input), compare **two** model responses.
-
-Score each response from 1‑10 (10 = perfect) considering:
-• Relevance / correctness
-• Completeness
-• Fluency & coherence
-
+Score each response from 1‑10 (10 = perfect) considering:
+• Relevance / correctness
+• Completeness
+• Fluency & coherence
 Return *exactly*:
-
-- Model A Score: X
-- Model B Score: Y
+- Model A Score: X
+- Model B Score: Y
 - Better Model: [A / B / Tie]
 """.strip()
 
@@ -43,13 +54,14 @@ def gpt_pair(
     model: str = "gpt-4o",
     max_tokens: int = 150,
 ) -> Tuple[int, int]:
+    """Call GPT‑4 and parse the two scores."""
     block = f'Instruction:\n"{instruction}"'
     if _input:
         block += f'\n\nInput:\n"{_input}"'
     prompt = (
         PAIR_PROMPT
         + f"\n\n{block}\n\nResponse **Model A**:\n\"\"\"{resp_a}\"\"\""
-          f"\n\nResponse **Model B**:\n\"\"\"{resp_b}\"\"\""
+        + f"\n\nResponse **Model B**:\n\"\"\"{resp_b}\"\"\""
     )
     reply = client.chat.completions.create(
         model=model,
@@ -62,18 +74,18 @@ def gpt_pair(
         raise ValueError("Cannot parse GPT reply:\n" + reply.choices[0].message.content)
     return int(m.group(1)), int(m.group(2))
 
-
 # ---------------- I/O helpers ---------------- #
+
 def load_jsonl(path: str) -> List[dict]:
     with open(path, "r", encoding="utf-8") as f:
         return [json.loads(l) for l in f]
 
-def key(rec: dict) -> Tuple[str, str]:
-    """unique match key: (instruction, input)"""
-    return (rec["text"].strip(), "")
-
+def match_key(rec: dict) -> Tuple[str, str]:
+    """Unique match key between prediction & baseline."""
+    return (rec["instruction"].strip(), rec.get("input", ""))
 
 # ------------------------- main ------------------------ #
+
 def main(
     exp_name: str = "fedavg-1B",
     prediction_dir: str = "./predictions",
@@ -85,17 +97,17 @@ def main(
     evaluation_dir: str = "./evaluations",
     api_key: str = "",
     gpt_model: str = "gpt-4o",
+    n_eval: int = 3,
     sleep_between_calls: float = 1.5,
 ):
-    """
-    Compare <prediction> vs <baseline> with GPT‑4 pairwise scoring.
-    """
+    """Compare *prediction* vs *baseline* with *n_eval* GPT‑4 votes per sample."""
+
+    if n_eval < 1:
+        raise ValueError("n_eval must be ≥ 1")
 
     # ---------- resolve paths ---------- #
     pred_fname = (
-        "global_output.jsonl"
-        if client_id is None
-        else f"client_{client_id}_output.jsonl"
+        "global_output.jsonl" if client_id is None else f"client_{client_id}_output.jsonl"
     )
     pred_file = os.path.join(
         prediction_dir, exp_name, str(communication_rounds), pred_fname
@@ -110,49 +122,65 @@ def main(
     preds = load_jsonl(pred_file)
     base  = load_jsonl(baseline_file)
 
-    pred_map = {key(r): r for r in preds}
-    base_map = {key(r): r for r in base}
+    pred_map = {match_key(r): r for r in preds}
+    base_map = {match_key(r): r for r in base}
 
     client = openai.OpenAI(api_key=api_key)
 
-    pair_results = []
+    # ---------- accumulate per‑category stats ---------- #
+    cat_stats: Dict[str, Dict[str, float]] = {}
+
+    total_samples = 0
+
     for k, p_rec in tqdm(pred_map.items(), desc="Evaluating"):
         b_rec = base_map.get(k)
         if b_rec is None:
-            print("baseline missing for a sample, skip.")
+            print("Baseline missing for a sample, skip.")
             continue
 
+        cat = p_rec.get("category", "unknown")
         instr, inp = k
-        try:
-            a_s, b_s = gpt_pair(
-                client,
-                instr,
-                inp,
-                p_rec[prediction_key],
-                b_rec[baseline_key],
-                model=gpt_model,
-            )
-        except Exception as e:
-            print("GPT error:", e)
-            continue
 
-        pair_results.append(
-            dict(
-                instruction=instr,
-                input=inp,
-                prediction_score=a_s,
-                baseline_score=b_s,
-            )
+        pred_votes, base_votes = [], []
+        for _ in range(n_eval):
+            try:
+                p_score, b_score = gpt_pair(
+                    client,
+                    instr,
+                    inp,
+                    p_rec[prediction_key],
+                    b_rec[baseline_key],
+                    model=gpt_model,
+                )
+            except Exception as e:
+                print("GPT error:", e)
+                break
+            pred_votes.append(p_score)
+            base_votes.append(b_score)
+            time.sleep(sleep_between_calls)
+
+        if len(pred_votes) != n_eval:
+            continue  # incomplete votes ⇒ skip sample
+
+        total_samples += 1
+        cat_entry = cat_stats.setdefault(
+            cat,
+            dict(num_samples=0, pred_sum=0.0, base_sum=0.0),
         )
-        time.sleep(sleep_between_calls)
+        cat_entry["num_samples"] += 1
+        cat_entry["pred_sum"]  += sum(pred_votes) / n_eval
+        cat_entry["base_sum"]  += sum(base_votes) / n_eval
 
     # ---------- summarise ---------- #
-    ps = [r["prediction_score"] for r in pair_results]
-    bs = [r["baseline_score"]   for r in pair_results]
-    summary = {
-        "avg_prediction_score": sum(ps) / len(ps) if ps else None,
-        "avg_baseline_score"  : sum(bs) / len(bs) if bs else None,
-        "num_samples"         : len(pair_results),
+    for c, d in cat_stats.items():
+        n = d["num_samples"]
+        d["avg_prediction_score"] = d.pop("pred_sum") / n if n else None
+        d["avg_baseline_score"]   = d.pop("base_sum") / n if n else None
+
+    out_summary = {
+        "votes_per_sample": n_eval,
+        "num_samples"     : total_samples,
+        "categories"      : cat_stats,
     }
 
     # ---------- save ---------- #
@@ -164,9 +192,8 @@ def main(
     )
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(dict(summary=summary, details=pair_results), f, indent=2)
+        json.dump(out_summary, f, indent=2)
     print("\n  Saved results to", out_path)
-
 
 if __name__ == "__main__":
     fire.Fire(main)
