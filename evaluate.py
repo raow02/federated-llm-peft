@@ -89,7 +89,7 @@ def main(
     prediction_dir: str = "./predictions",
     communication_rounds: int = 50,
     client_id: Optional[int] = None,       # None → global predictions
-    baseline_file: str = "baseline_output.jsonl",
+    baseline_file: str = "base_model_output.jsonl",
     prediction_key: str = "answer",
     baseline_key: str = "answer",
     evaluation_dir: str = "./evaluations",
