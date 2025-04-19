@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
 """
 Pairwise GPT‑4 evaluation: compare *one* prediction file (global or client)
 against an explicit *baseline* prediction file, with *n_eval* independent
