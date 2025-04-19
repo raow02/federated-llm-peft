@@ -78,13 +78,14 @@ class EvalDataset(Dataset):
 def generate(
     exp_name: str = 'fedavg-1B',
     base_model: str = "",
-    model_dir: str = './models',
+    model_dir: str = './output_models',
     is_global_model: bool = True,
     client_id: int = 0,
     communication_rounds: int = 50,
     test_file_path: str = "",
     prediction_dir: str = "./predictions",
     batch_size: int = 2,
+    is_base_model: bool = False,  # Whether to use just the base model without fine-tuning
 ):
     """
     Generate responses using trained models.
@@ -100,6 +101,7 @@ def generate(
         test_file_path: Path to test data
         results_dir: Directory to save results
         batch_size: Batch size for generation
+        is_base_model: Whether to use just the base model without any fine-tuning
     """
     # Set random seed for reproducibility
     set_seed(309)
@@ -117,7 +119,7 @@ def generate(
     prompter = Prompter()
     gpu_count = torch.cuda.device_count()
     
-    print(f"Loading model from {experiment_model_dir}")
+    print(f"Loading model from {base_model}")
     print(f"Using device: {device} (GPUs: {gpu_count})")
     
     # Load base model with 8-bit quantization
@@ -128,42 +130,47 @@ def generate(
         torch_dtype=torch.float16,
         device_map="auto",
     )
-    model = prepare_model_for_kbit_training(model)
-
-    # Load LoRA weights based on whether using global or client model
-    if is_global_model:
-        # Load global model
-        config_path = os.path.join(experiment_model_dir, str(round_idx))
-        weights_path = os.path.join(experiment_model_dir, str(round_idx), "global_adapter_model.bin")
-        print(f"Loading global model weights from {weights_path}")
-        print(f"Using global config from {config_path}")
+    
+    # Only apply LoRA weights if not using base model
+    if not is_base_model:
+        model = prepare_model_for_kbit_training(model)
+        
+        # Load LoRA weights based on whether using global or client model
+        if is_global_model:
+            # Load global model
+            config_path = os.path.join(experiment_model_dir, str(round_idx))
+            weights_path = os.path.join(experiment_model_dir, str(round_idx), "global_adapter_model.bin")
+            print(f"Loading global model weights from {weights_path}")
+            print(f"Using global config from {config_path}")
+        else:
+            # Load client-specific model
+            client_model_dir = os.path.join(experiment_model_dir, str(round_idx), f"client_{client_id}")
+            config_path = os.path.join(client_model_dir)
+            weights_path = os.path.join(client_model_dir, "adapter_model.bin")
+            print(f"Loading client {client_id} weights from {weights_path}")
+            print(f"Using client config from {config_path}")
+        
+        # Verify paths exist
+        if not os.path.exists(os.path.join(config_path, "adapter_config.json")):
+            raise FileNotFoundError(f"Config file not found at {config_path}. Make sure the path is correct.")
+        if not os.path.exists(weights_path):
+            raise FileNotFoundError(f"Model weights not found at {weights_path}. Make sure the path is correct.")
+        
+        # Load LoRA configuration
+        config = LoraConfig.from_pretrained(config_path)
+        
+        # Load weights with appropriate device handling
+        if gpu_count < 3:
+            lora_weights = torch.load(weights_path, map_location=lambda storage, loc: storage.cuda(0))
+        else:
+            lora_weights = torch.load(weights_path)
+        
+        # Apply LoRA weights to model
+        model = PeftModel(model, config)
+        set_peft_model_state_dict(model, lora_weights, "default")
+        del lora_weights  # Free up memory
     else:
-        # Load client-specific model
-        client_model_dir = os.path.join(experiment_model_dir, str(round_idx), f"client_{client_id}")
-        config_path = os.path.join(client_model_dir)
-        weights_path = os.path.join(client_model_dir, "adapter_model.bin")
-        print(f"Loading client {client_id} weights from {weights_path}")
-        print(f"Using client config from {config_path}")
-    
-    # Verify paths exist
-    if not os.path.exists(os.path.join(config_path, "adapter_config.json")):
-        raise FileNotFoundError(f"Config file not found at {config_path}. Make sure the path is correct.")
-    if not os.path.exists(weights_path):
-        raise FileNotFoundError(f"Model weights not found at {weights_path}. Make sure the path is correct.")
-    
-    # Load LoRA configuration
-    config = LoraConfig.from_pretrained(config_path)
-    
-    # Load weights with appropriate device handling
-    if gpu_count < 3:
-        lora_weights = torch.load(weights_path, map_location=lambda storage, loc: storage.cuda(0))
-    else:
-        lora_weights = torch.load(weights_path)
-    
-    # Apply LoRA weights to model
-    model = PeftModel(model, config)
-    set_peft_model_state_dict(model, lora_weights, "default")
-    del lora_weights  # Free up memory
+        print("Using base model without fine-tuning")
 
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(base_model)
@@ -260,7 +267,9 @@ def generate(
     os.makedirs(round_prediction_dir, exist_ok=True)
     
     # Determine output filename
-    if is_global_model:
+    if is_base_model:
+        output_file = os.path.join(round_prediction_dir, "base_model_output.jsonl")
+    elif is_global_model:
         output_file = os.path.join(round_prediction_dir, "global_output.jsonl")
     else:
         output_file = os.path.join(round_prediction_dir, f"client_{client_id}_output.jsonl")
