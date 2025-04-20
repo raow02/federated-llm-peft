@@ -47,7 +47,7 @@ def fl_finetune(
         num_communication_rounds: int = 20,
         num_clients: int = 8,
         # Federation mode
-        federation_mode: str = "homo",  # "none", "homo", or "hetero"
+        federation_mode: str = "homo",  # "none", "homo", "hetero", or "seq"
         # Local training hyperparams
         local_batch_size: int = 128,
         local_micro_batch_size: int = 8,
@@ -80,7 +80,7 @@ def fl_finetune(
         client_selection_frac: Fraction of clients to select
         num_communication_rounds: Number of communication rounds
         num_clients: Total number of clients
-        federation_mode: Federation strategy ("none", "homo", or "hetero")
+        federation_mode: Federation strategy ("none", "homo", "hetero", or "seq")
         local_batch_size: Batch size for local training
         local_micro_batch_size: Micro batch size for gradient accumulation
         local_num_epochs: Number of epochs for local training
@@ -96,11 +96,13 @@ def fl_finetune(
         group_by_length: Whether to group sequences by length
     """
     # Validate federation mode
-    assert federation_mode in ["none", "homo", "hetero"], \
-        "federation_mode must be one of 'none', 'homo', or 'hetero'"
+    assert federation_mode in ["none", "homo", "hetero", "seq"], \
+        "federation_mode must be one of 'none', 'homo', 'hetero', or 'seq'"
 
     use_hetlora = (federation_mode == "hetero")
+    # Federation includes homo and hetero modes. Seq and none are non-federated.
     use_federation = (federation_mode in ["homo", "hetero"])
+    use_sequential = (federation_mode == "seq")
 
     # Create experiment output directory
     model_output_dir = os.path.join(model_dir, exp_name)
@@ -230,10 +232,10 @@ def fl_finetune(
             client_lora_ranks[client_id] = lora_r
         print(f"Using homogeneous LoRA with rank {lora_r} for all clients")
 
-    # Initialize global parameters
-    # Create a global config for reference
+    # Initialize global parameters (or initial parameters for seq mode)
+    # Create a global config for reference (used for homo, hetero, and seq initial/saving)
     global_config = LoraConfig(
-        r=global_rank,
+        r=global_rank, # In seq mode, global_rank is just lora_r
         lora_alpha=lora_alpha,
         target_modules=lora_target_modules,
         lora_dropout=lora_dropout,
@@ -241,42 +243,64 @@ def fl_finetune(
         task_type="CAUSAL_LM",
     )
     
-    # Initialize global model and get initial parameters
-    global_model = get_peft_model(base_model_obj, global_config)
-    global_params = get_peft_model_state_dict(global_model)
+    # Initialize model with adapter and get initial parameters
+    initial_model = get_peft_model(base_model_obj, global_config)
+    current_params = get_peft_model_state_dict(initial_model)
     
-    # Now remove the adapter from the base model
-    base_model_obj = global_model.get_base_model()
-    print(type(global_model), type(base_model_obj))
-    del global_model  # Free up memory
+    # Now remove the adapter from the base model object for client loading
+    base_model_obj = initial_model.get_base_model()
+    print(type(initial_model), type(base_model_obj))
+    del initial_model  # Free up memory
 
-    # Start federated training
-    print(f"Starting {'federated' if use_federation else 'isolated'} training...")
+    # Start training
+    print(f"Starting {'federated' if use_federation else ('sequential' if use_sequential else 'isolated')} training...")
     
     # Initialize tracking variables
     previously_selected_clients = set()
     last_client_id = None
     local_dataset_len_dict = {}
 
+    # Determine the number of loops/epochs
+    # For seq mode, num_communication_rounds can mean number of passes over all clients
+    # For simplicity here, let's assume 1 pass if seq mode is chosen, unless num_communication_rounds > 1
+    # If rounds > 1 in seq mode, the state passes from the last client of round N to the first client of round N+1
+    num_training_loops = num_communication_rounds
+    if use_sequential:
+        print("Sequential mode selected. Forcing num_training_loops to 1.")
+        num_training_loops = 1
+
     # Main training loop
-    for epoch in tqdm(range(num_communication_rounds), desc="Communication Rounds"):
-        print(f"\nRound {epoch+1}/{num_communication_rounds}")
+    for epoch in tqdm(range(num_training_loops), desc="Training Loop/Rounds"):
+        print(f"\nLoop/Round {epoch+1}/{num_training_loops}")
         
-        # Select clients for this round
-        selected_clients = select_clients(
-            num_clients, 
-            client_selection_frac, 
-            client_selection_strategy,
-            seed=epoch
-        )
+        # Select clients for this round/loop
+        if use_sequential:
+            # Iterate through all clients sequentially
+            selected_clients = list(range(num_clients))
+            print(f"Sequential mode: Processing clients {selected_clients}")
+        elif use_federation:
+            # Select a fraction of clients for federated learning
+            selected_clients = select_clients(
+                num_clients, 
+                client_selection_frac, 
+                client_selection_strategy,
+                seed=epoch # Use epoch as seed for reproducibility per round
+            )
+            print(f"Federated mode: Selected clients {selected_clients}")
+        else: # mode == "none"
+            # Train all clients independently (similar structure to sequential but without state passing)
+            selected_clients = list(range(num_clients))
+            print(f"Isolated mode: Processing clients {selected_clients}")
+
+        client_states_for_aggregation = {} # Only used in federated modes
 
         # Train each selected client
         for client_id in selected_clients:
-            # Get client-specific rank
-            client_rank = client_lora_ranks[client_id]
+            # Get client-specific rank (always lora_r for homo and seq)
+            client_rank = client_lora_ranks[client_id] # This dict holds lora_r for seq/homo
             print(f"\nClient {client_id}: Using LoRA rank {client_rank}")
             
-            # Create client-specific configuration with the correct rank
+            # Create client-specific configuration
             client_config = LoraConfig(
                 r=client_rank,
                 lora_alpha=lora_alpha,
@@ -286,36 +310,40 @@ def fl_finetune(
                 task_type="CAUSAL_LM",
             )
             
-            # Create a fresh client model
-            # Ensure base_model_obj has no PEFT adapters
+            # Create a fresh client model by adding adapter to the base model
+            # Ensure base_model_obj has no PEFT adapters before adding a new one
             if hasattr(base_model_obj, "get_base_model"):
-                print('\n\n\nGET BASE MODEL\n\n\n')
+                # This check might be redundant if we manage base_model_obj correctly, but safe to keep
+                print('\nEnsuring clean base model before adding adapter\n')
                 base_model_obj = base_model_obj.get_base_model()
                 
             client_model = get_peft_model(
                 base_model_obj, 
                 client_config,
-                adapter_name="default"
+                adapter_name="default" # Use a consistent adapter name
             )
             
-            # Load weights from global parameters
+            # Load weights into the client model
             if use_federation:
                 if use_hetlora:
                     print(f"Client {client_id}: Loading weights from global parameters (heterogeneous)")
-                    # For HetLoRA, we need to handle different ranks
                     client_weights = load_hetlora_weights(
                         client_config,
-                        global_params,
+                        current_params, # Use current_params which holds global state
                         client_rank
                     )
-                    # Apply the weights to the client model
                     set_peft_model_state_dict(client_model, client_weights, "default")
-                else:
+                else: # Homo FedAvg
                     print(f"Client {client_id}: Loading weights from global parameters (homogeneous)")
-                    # For homogeneous LoRA, we can directly load the weights
-                    set_peft_model_state_dict(client_model, global_params, "default")
-                
-            # Initialize client
+                    set_peft_model_state_dict(client_model, current_params, "default")
+            elif use_sequential:
+                # Load the state from the *previous* step (or initial if client_id == 0 and epoch == 0)
+                print(f"Client {client_id}: Loading weights from previous step (sequential)")
+                # current_params holds the state from the previous client or the initial state
+                set_peft_model_state_dict(client_model, current_params, "default")
+            # else: mode == "none", start fresh from base + new adapter (no loading needed)
+
+            # Initialize client trainer
             client = FederatedClient(client_id, client_model, client_data_path, model_output_dir)
             
             # Prepare client for training
@@ -335,97 +363,128 @@ def fl_finetune(
             print(f"Training client {client_id}")
             client.train()
 
-            # Save client model weights
-            print(f"Saving model for client {client_id}")
-            local_dataset_len_dict, previously_selected_clients, last_client_id = client.save_client_state(
-                epoch, local_dataset_len_dict, previously_selected_clients
-            )
+            # Get the trained parameters from the client model
+            trained_client_params = get_peft_model_state_dict(client_model)
+
+            # Save client model weights (as done by client.save_client_state)
+            # We manually replicate the saving part here to ensure the correct state is saved
+            print(f"Saving model state for client {client_id} after training")
+            local_dataset_len_dict[client_id] = len(client.local_train_dataset) # Get dataset length
+            participating_clients = previously_selected_clients | {client_id} # Update participants (less relevant for seq)
+            last_client_id = client_id # Track last client processed
+
+            # Create client directory within the current epoch/loop directory
+            client_epoch_dir = os.path.join(model_output_dir, str(epoch), f"client_{client_id}")
+            os.makedirs(client_epoch_dir, exist_ok=True)
             
-            # Get the base model back
+            # Save adapter weights
+            adapter_weights_path = os.path.join(client_epoch_dir, "adapter_model.bin")
+            torch.save(trained_client_params, adapter_weights_path)
+            print(f"Saved adapter weights to {adapter_weights_path}")
+            
+            # Save client-specific config (which is the same as global_config in seq/homo mode)
+            client_config.save_pretrained(client_epoch_dir)
+            print(f"Saved adapter config to {client_epoch_dir}")
+
+            # Update current_params for the next step in sequential mode
+            if use_sequential:
+                print(f"Updating current parameters with client {client_id}'s result.")
+                current_params = trained_client_params # Pass the trained state to the next client
+            
+            # Store client state for potential aggregation (only used in federated modes)
+            if use_federation:
+                client_states_for_aggregation[client_id] = trained_client_params
+
+            # Get the base model back for the next client
+            # This ensures we always add a fresh adapter to the clean base model
             base_model_obj = client_model.get_base_model()
             
-            # Clean up
+            # Clean up client-related objects
             del client
             del client_model
+            del trained_client_params # Free memory
+            if use_federation and use_hetlora:
+                del client_weights # Free memory if HetLoRA was used
 
         # Perform model aggregation if using federation
         if use_federation:
             print("\n======= Aggregating client models =======")
+            # Note: We need the saved client models for aggregation,
+            # The current implementation of fedavg/hetlora reads from disk based on epoch/client_id.
+            # We need to ensure the parameters passed to fedavg/hetlora are correct.
+            # Let's pass the global state `current_params` and let the functions update it.
+            
+            # Get the list of clients that participated in *this* round
+            clients_in_this_round = selected_clients # Use the list of clients selected for this round
+
             if use_hetlora:
                 print("Using HetLoRA sparsity-weighted aggregation")
-                # Use HetLoRA aggregation
-                global_params = hetlora(
-                    global_params,
-                    selected_clients,
+                current_params = hetlora(
+                    current_params, # Pass the current global state
+                    clients_in_this_round,
                     model_output_dir,
                     local_dataset_len_dict,
                     epoch,
                     client_lora_ranks
                 )
-            else:
+            else: # Homo FedAvg
                 print("Using FedAvg homogeneous aggregation")
-                # Use standard FedAvg
-                global_params = fedavg(
-                    global_params,
-                    selected_clients,
+                current_params = fedavg(
+                    current_params, # Pass the current global state
+                    clients_in_this_round,
                     model_output_dir,
                     local_dataset_len_dict,
                     epoch
                 )
             
-            # Save global model parameters
+            # Save aggregated global model parameters
             round_dir = os.path.join(model_output_dir, str(epoch))
-            os.makedirs(round_dir, exist_ok=True)
+            # The directory should already exist from client saving, but make sure
+            os.makedirs(round_dir, exist_ok=True) 
             global_params_path = os.path.join(round_dir, "global_adapter_model.bin")
-            torch.save(global_params, global_params_path)
-            print(f"Saved global parameters to {global_params_path}")
+            torch.save(current_params, global_params_path)
+            print(f"Saved aggregated global parameters to {global_params_path}")
             
-            # Save global config
-            global_config = LoraConfig(
-                r=global_rank,
-                lora_alpha=lora_alpha,
-                target_modules=lora_target_modules,
-                lora_dropout=lora_dropout,
-                bias="none",
-                task_type="CAUSAL_LM",
-            )
-            config_path = os.path.join(round_dir)
+            # Save global config (should be consistent across rounds)
+            config_path = os.path.join(round_dir) # Save to the round directory
             global_config.save_pretrained(config_path)
             print(f"Saved global config with rank {global_rank} to {config_path}")
-        else:
-            print("\nNo federation: client models saved individually")
+        
+        elif use_sequential:
+            print("\nSequential mode: No aggregation performed. State passed to next client.")
+            # Optionally save the final state after the last client in the sequence for this epoch
+            final_seq_state_path = os.path.join(model_output_dir, str(epoch), "final_sequential_adapter_model.bin")
+            torch.save(current_params, final_seq_state_path)
+            global_config.save_pretrained(os.path.join(model_output_dir, str(epoch))) # Save config too
+            print(f"Saved final sequential state for epoch {epoch} to {final_seq_state_path}")
 
-        # Evaluate global model if validation data is provided
+        else: # mode == "none"
+            print("\nIsolated mode: No aggregation performed. Client models saved individually.")
+
+        # Evaluate global model (or current sequential model) if validation data is provided
         if val_data_path:
             try:
-                print("\nEvaluating global model on validation data...")
-                # Ensure base_model_obj has no PEFT adapters
+                print("\nEvaluating model state on validation data...")
+                # Ensure base_model_obj is clean
                 if hasattr(base_model_obj, "get_base_model"):
                     base_model_obj = base_model_obj.get_base_model()
                 
-                # Create a temporary model with global parameters for evaluation
-                eval_config = LoraConfig(
-                    r=global_rank,
-                    lora_alpha=lora_alpha,
-                    target_modules=lora_target_modules,
-                    lora_dropout=lora_dropout,
-                    bias="none",
-                    task_type="CAUSAL_LM",
-                )
-                eval_model = get_peft_model(base_model_obj, eval_config)
+                # Create a temporary model with the current parameters for evaluation
+                # Use global_config as it defines the structure (rank might differ for HetLoRA, but eval uses max rank)
+                eval_model = get_peft_model(base_model_obj, global_config)
                 
-                # Load the global parameters
-                set_peft_model_state_dict(eval_model, global_params, "default")
+                # Load the current parameters (either aggregated global or final sequential state)
+                set_peft_model_state_dict(eval_model, current_params, "default")
                 
                 # Evaluate
                 eval_loss = evaluate_global_model(
                     eval_model, 
                     val_data_path, 
                     generate_and_tokenize_prompt, 
-                    batch_size=1, 
+                    batch_size=1, # Keep batch size small for evaluation consistency
                     device='cuda' if torch.cuda.is_available() else 'cpu'
                 )
-                print(f"Round {epoch + 1} validation loss: {eval_loss}")
+                print(f"Loop/Round {epoch + 1} validation loss: {eval_loss}")
                 
                 # Get base model back
                 base_model_obj = eval_model.get_base_model()
