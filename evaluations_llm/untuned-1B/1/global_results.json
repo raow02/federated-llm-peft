@@ -1,0 +1,62 @@
+{
+  "overall_pred_avg": 56.78333333333333,
+  "overall_prop_avg": 69.8625,
+  "overall_ratio": 1.2303346052245376,
+  "categories": {
+    "brainstorming": {
+      "num_samples": 200,
+      "avg_prediction_score": 59.400000000000006,
+      "avg_proposed_score": 64.2,
+      "ratio": 1.0808080808080807
+    },
+    "classification": {
+      "num_samples": 200,
+      "avg_prediction_score": 44.20000000000001,
+      "avg_proposed_score": 58.70000000000001,
+      "ratio": 1.3280542986425339
+    },
+    "closed_qa": {
+      "num_samples": 200,
+      "avg_prediction_score": 58.03333333333333,
+      "avg_proposed_score": 80.26666666666667,
+      "ratio": 1.383113153360138
+    },
+    "creative_writing": {
+      "num_samples": 200,
+      "avg_prediction_score": 60.13333333333333,
+      "avg_proposed_score": 70.26666666666667,
+      "ratio": 1.1685144124168514
+    },
+    "general_qa": {
+      "num_samples": 200,
+      "avg_prediction_score": 63.56666666666666,
+      "avg_proposed_score": 69.6,
+      "ratio": 1.0949134766649187
+    },
+    "information_extraction": {
+      "num_samples": 200,
+      "avg_prediction_score": 53.6,
+      "avg_proposed_score": 77.63333333333333,
+      "ratio": 1.4483830845771142
+    },
+    "open_qa": {
+      "num_samples": 200,
+      "avg_prediction_score": 59.93333333333332,
+      "avg_proposed_score": 64.5,
+      "ratio": 1.0761957730812015
+    },
+    "summarization": {
+      "num_samples": 200,
+      "avg_prediction_score": 55.4,
+      "avg_proposed_score": 73.73333333333333,
+      "ratio": 1.3309265944645006
+    }
+  },
+  "votes_per_sample": 3,
+  "num_samples": 1600,
+  "eval_failures": 0,
+  "total_in_files": 1600,
+  "batched_evaluation": true,
+  "batch_size": 20,
+  "retry_attempts": 6
+}
