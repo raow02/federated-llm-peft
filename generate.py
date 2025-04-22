@@ -268,7 +268,7 @@ def generate(
     
     # Determine output filename
     if is_base_model:
-        output_file = os.path.join(round_prediction_dir, "base_model_output.jsonl")
+        output_file = os.path.join(round_prediction_dir, "global_output.jsonl")
     elif is_global_model:
         output_file = os.path.join(round_prediction_dir, "global_output.jsonl")
     else:
