@@ -298,6 +298,7 @@ def generate(
         if i % 10 == 0 or i == len(test_data) - 1:
             print(f'Sample {i+1}/{len(test_data)}')
             print(f"Instruction: {result['instruction']}")
+            print(f"Input: {result['input']}")
             print(f"Response: {result['answer']}")
             print("="*50)
     
