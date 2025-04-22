@@ -297,7 +297,7 @@ def generate(
         # Print progress
         if i % 10 == 0 or i == len(test_data) - 1:
             print(f'Sample {i+1}/{len(test_data)}')
-            print(f"Instruction: {result['text']}")
+            print(f"Instruction: {result['instruction']}")
             print(f"Response: {result['answer']}")
             print("="*50)
     
