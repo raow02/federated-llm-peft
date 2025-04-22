@@ -283,7 +283,8 @@ def generate(
         
     for i, (test_sample, response) in enumerate(zip(test_data, all_responses)):
         result = {
-            'text': test_sample['instruction'],
+            'instruction': test_sample['instruction'],
+            'input': test_sample.get('input', ''),  # Get input if it exists, otherwise empty string
             'answer': response,
             'category': test_sample['category']
         }
