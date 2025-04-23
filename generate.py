@@ -268,7 +268,7 @@ def generate(
     
     # Determine output filename
     if is_base_model:
-        output_file = os.path.join(round_prediction_dir, "base_model_output.jsonl")
+        output_file = os.path.join(round_prediction_dir, "global_output.jsonl")
     elif is_global_model:
         output_file = os.path.join(round_prediction_dir, "global_output.jsonl")
     else:
@@ -297,7 +297,8 @@ def generate(
         # Print progress
         if i % 10 == 0 or i == len(test_data) - 1:
             print(f'Sample {i+1}/{len(test_data)}')
-            print(f"Instruction: {result['text']}")
+            print(f"Instruction: {result['instruction']}")
+            print(f"Input: {result['input']}")
             print(f"Response: {result['answer']}")
             print("="*50)
     

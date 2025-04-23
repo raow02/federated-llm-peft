@@ -480,22 +480,53 @@ def main(
         print(f"Total retry attempts: {retry_count}")
     print(f"Total processed + failures: {total_samples + eval_failures}")
 
-    # ---------- summarise ---------- #
+    # ------------------------- summarise ------------------------
+
+    # Compute per-category averages and ratios
     for stats in cat_stats.values():
         n = stats["num_samples"]
+        # calculate average prediction and proposed scores for this category
         stats["avg_prediction_score"] = stats.pop("pred_sum") / n if n else None
-        stats["avg_proposed_score"] = stats.pop("proposed_sum") / n if n else None
+        stats["avg_proposed_score"]   = stats.pop("proposed_sum") / n if n else None
+        # calculate ratio of proposed to prediction for this category
+        if stats["avg_prediction_score"]:
+            stats["ratio"] = stats["avg_proposed_score"] / stats["avg_prediction_score"]
+        else:
+            stats["ratio"] = None
 
+    # Compute overall weighted sums across all categories
+    weighted_pred_sum = sum(
+        stats["avg_prediction_score"] * stats["num_samples"]
+        for stats in cat_stats.values() if stats["avg_prediction_score"] is not None
+    )
+    weighted_prop_sum = sum(
+        stats["avg_proposed_score"] * stats["num_samples"]
+        for stats in cat_stats.values() if stats["avg_proposed_score"] is not None
+    )
+
+    # Compute overall averages
+    overall_pred_avg = weighted_pred_sum / total_samples if total_samples else None
+    overall_prop_avg = weighted_prop_sum / total_samples if total_samples else None
+    # compute overall ratio (guarding against division by zero)
+    overall_ratio    = overall_prop_avg / overall_pred_avg if overall_pred_avg else None
+
+    # Construct final summary including overall metrics and per-category stats
     out_summary = {
-        "votes_per_sample": n_eval,
-        "num_samples": total_samples,
-        "eval_failures": eval_failures,
-        "total_in_files": min_length,
-        "categories": cat_stats,
-        "batched_evaluation": use_batching,
-        "batch_size": batch_size if use_batching else None,
-        "retry_attempts": retry_count if use_batching else None,
+        # include overall averages and ratio
+        "overall_pred_avg":    overall_pred_avg,
+        "overall_prop_avg":    overall_prop_avg,
+        "overall_ratio":       overall_ratio,
+        # include per-category statistics with their ratios
+        "categories":          cat_stats,
+        "votes_per_sample":    n_eval,
+        "num_samples":         total_samples,
+        "eval_failures":       eval_failures,
+        "total_in_files":      min_length,
+        "batched_evaluation":  use_batching,
+        "batch_size":          batch_size if use_batching else None,
+        "retry_attempts":      retry_count if use_batching else None,
     }
+
 
     # ---------- save ---------- #
     out_path = os.path.join(
