@@ -6,7 +6,7 @@ This project focuses on **Federated Fine-tuning of Large Language Models (LLMs)*
 
 The primary goal is to explore different federated learning strategies for LLM fine-tuning, including:
 
-*   **Federated Averaging (FedAvg):** Federated learning with FedAvg(`federation_mode="homo"`).
+*   **Federated Averaging (FedAvg):** Federated learning with FedAvg (`federation_mode="homo"`).
 *   **Sequential Training:** Clients train one after another, passing the model state sequentially (`federation_mode="seq"`).
 *   **Independent Training:** Each client trains independently for comparison (`federation_mode="none"`).
 
